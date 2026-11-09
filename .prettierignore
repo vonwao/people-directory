@@ -1,0 +1,6 @@
+dist/
+coverage/
+package-lock.json
+framework/mock-server/mockServiceWorker.js
+# the task brief, left as it came
+DevTask.md
