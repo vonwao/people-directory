@@ -20,89 +20,61 @@ Then open <http://localhost:3000>.
 - `/appWithoutSSRData`: the server sends "Loading..." and the browser fetches the list.
 - `/appWithSSRData`: the server fetches the list first and sends the full page along with the data, so the browser doesn't call the API at all.
 
-Other scripts:
+`npm test` runs the tests. `npm run check` runs everything CI runs: type-check, lint, format check, tests and build.
 
-- `npm test` runs the tests once (`npm run test:watch` keeps them running).
-- `npm run typecheck`, `npm run lint` and `npm run format` do what they say.
-- `npm run check` runs everything CI runs: type-check, lint, format check, tests and build.
-
-## How the cache works
+## How the cache works (Task 2)
 
 App, Person and Name all ask for the same URL. The library keeps one cache, keyed by URL. Each entry is either loading, success or error.
 
-In the browser (`/appWithoutSSRData`):
+In the browser, the first render returns `isLoading: true`, which is also what the server rendered, so hydration matches. After mount, an effect starts the request and marks the URL as loading right away. Any other component that asks for the same URL sees that entry and doesn't start its own request. So there's one network request, no matter how many components use the URL. Components subscribe with `useSyncExternalStore`, so they all re-render when the result arrives.
 
-1. The first render finds nothing cached, so the hook returns `isLoading: true`. That's also what the server rendered, so hydration matches.
-2. After mount, an effect starts the request and marks the URL as loading in the cache right away. Any other component that mounts before it finishes sees the loading entry and doesn't start its own request. So there's one network request, no matter how many components use the URL. (In this app Person and Name only mount once App has the data, so for them it's a plain cache hit.)
-3. When the request finishes, the entry becomes success or error, and every component using it re-renders. Components subscribe with `useSyncExternalStore`, which is React's built-in way to read from a store that lives outside React.
+On the server, the framework calls `preloadCachingFetch(url)` and waits for it before rendering, so the HTML has the whole list. This works with JavaScript turned off. `serializeCache()` turns the cache into a string for the page, and `initializeCache()` loads it in the browser before hydration, so there's no API request.
 
-On the server (`/appWithSSRData`):
+Some choices I made:
 
-1. The framework calls `preloadCachingFetch(url)` and waits for it before rendering.
-2. `renderToString` finds the data in the cache, so the HTML has the whole list. This works with JavaScript turned off.
-3. `serializeCache()` turns the cache into a string, and the framework puts it in the page. In the browser, `initializeCache()` loads it before hydration. The first render already has the data, so there's no API request.
-
-A few decisions worth mentioning:
-
-- **No fetching during render.** Requests start in an effect or in the preload, never while rendering. Rendering stays free of side effects, and a server render that wasn't preloaded never makes a request.
-- **The serialized cache is URI-encoded.** The framework drops the string straight into `<script>window.__INITIAL_DATA__ = '...'</script>` without escaping it. Plain JSON would break on an apostrophe (a name like O'Kon) or on `</script>` in the data, which is an XSS hole. `encodeURIComponent` leaves only characters that are safe there, plus the apostrophe, which I encode as `%27`. The cost is size: about 1.6x the JSON (18 KB instead of 11 KB here). I think that's fine for this.
-- **A failed preload doesn't turn into a 500.** The error goes in the cache, and the app shows its own error message. The error also goes to the browser with the rest of the cache, so hydration still matches.
-- **Non-2xx responses count as errors**, not just network failures.
-- **Late results get dropped.** If `wipeCache()` runs while a request is still in flight, that result doesn't end up in the new cache.
+- Requests start in an effect or in the preload, never during render.
+- The serialized cache is URI-encoded. The framework drops the string straight into an inline `<script>` without escaping it. Plain JSON would break on an apostrophe (a name like O'Kon) or on `</script>` in the data, which is an XSS hole. The cost is size, about 1.6x the JSON.
+- A failed preload doesn't turn into a 500. The error goes in the cache, and the app shows its own error message.
+- Non-2xx responses count as errors, not just network failures.
+- If `wipeCache()` runs while a request is still in flight, that late result is dropped.
 
 ## What I set up for Task 1, and why
 
-- **A build that works on Windows.** I'm on Windows, and `npm start` failed there because the scripts used `rm`, `mkdir` and `cp`. They also pointed at `index.js` files that don't exist (esbuild was quietly picking up the `.ts` files instead). [scripts/build.mjs](scripts/build.mjs) does the same job in plain Node. It also builds the server with `NODE_ENV=production`. Before, the server was running React's development build, which is slower. (esbuild already did this for the browser bundle, because it was minified.) The server bundle also gets source maps.
-- **Type-checking.** There was a `tsconfig.json`, but TypeScript wasn't installed and nothing ran it. Now `npm run typecheck` runs `tsc --noEmit`. I updated the config to match how the code is actually built: esbuild and Vitest compile, and TypeScript only checks.
-- **Tests with Vitest.** It handles TypeScript and JSX with no extra setup. [test/cachingFetch.test.tsx](test/cachingFetch.test.tsx) covers the library: one shared request, cache hits, errors, `wipeCache`, preloading, and the round trip through the framework's real inline script with awkward characters. [test/ssr.test.tsx](test/ssr.test.tsx) server-renders the real app against the mock API and checks that all 75 people are in the HTML, with one API request. [test/app.test.tsx](test/app.test.tsx) runs the real app in a simulated browser (jsdom) and covers the request counts from the acceptance criteria: one request without server data, and none when hydrating the server HTML, with no console errors.
-- **ESLint and Prettier.** ESLint uses `typescript-eslint` and the React hooks plugin, which catches missing effect dependencies. That's useful in a hooks library. Prettier is set to match the existing code (single quotes), so I didn't have to reformat anyone's files.
-- **CI.** A GitHub Actions workflow runs the type-check, lint, format check, tests and build on Ubuntu and Windows, with Node 22 and 24. Windows is in there because that's where the original build broke.
-- **Repeatable installs.** `package-lock.json` is committed, CI uses `npm ci`, and the Node version is in `.nvmrc` and `engines`. `.gitattributes` and `.editorconfig` keep line endings and indentation the same across operating systems.
-- **MSW worker path.** `package.json` told MSW the worker lived in `mockServer/`, so `npm install` created a stray `mockServer/` folder. The worker actually lives in `framework/mock-server/`. I fixed the path and regenerated the worker with `npx msw init`, so it matches the installed MSW version.
-- The package is marked `private`, so it can't get published to npm by accident.
+- **A build that works on Windows.** I'm on Windows, and `npm start` failed there because the scripts used `rm`, `mkdir` and `cp`. [scripts/build.mjs](scripts/build.mjs) does the same job in plain Node. It also builds the server with `NODE_ENV=production`. Before, the server was running React's development build, which is slower.
+- **Type-checking.** There was a `tsconfig.json`, but TypeScript wasn't installed and nothing ran it. Now `npm run typecheck` runs `tsc --noEmit`.
+- **Tests with Vitest.** It handles TypeScript and JSX with no extra setup. The tests cover the library, a server render of the real app, and the real app in a simulated browser (jsdom), including the request counts from the acceptance criteria.
+- **ESLint and Prettier.** The React hooks plugin catches missing effect dependencies, which is useful in a hooks library. Prettier is set to match the existing code, so I didn't have to reformat anyone's files.
+- **CI.** GitHub Actions runs the type-check, lint, format check, tests and build on Ubuntu and Windows, with Node 22 and 24. Windows is in there because that's where the original build broke.
+- **Repeatable installs.** `package-lock.json` is committed, CI uses `npm ci`, and the Node version is in `.nvmrc` and `engines`.
+- **MSW worker path.** `package.json` pointed MSW at the wrong folder, so `npm install` created a stray `mockServer/`. I fixed the path and regenerated the worker.
 
-What I'd add next:
+What I'd add next: Playwright tests in a real browser, a dev mode that rebuilds on save, pre-commit hooks, and the port and host set from environment variables.
 
-- Browser tests with Playwright against the real built server and service worker. The jsdom tests cover the same criteria, but not a real browser, so I also checked by hand (see below).
-- A dev mode that rebuilds on save.
-- Pre-commit hooks for lint and format, and Dependabot or Renovate for dependency updates.
-- Port, host and mocking set from environment variables, and a Dockerfile.
+## Checking it by hand
 
-## How I checked the acceptance criteria
+Besides the tests, I ran `npm start` and checked both routes in Chrome:
 
-Besides the tests, I ran `npm start` and checked:
-
-| Route                | Check                                | Result        |
-| -------------------- | ------------------------------------ | ------------- |
-| `/appWithoutSSRData` | People listed                        | 75            |
-| `/appWithoutSSRData` | People API requests in the browser   | 1             |
-| `/appWithSSRData`    | HTML with no JavaScript run (`curl`) | All 75 people |
-| `/appWithSSRData`    | People API requests after hydration  | 0             |
-| `/appWithSSRData`    | Console errors or hydration warnings | None          |
+- `/appWithoutSSRData`: 75 people listed, and one request to the people API.
+- `/appWithSSRData`: `curl` shows all 75 people in the HTML. After hydration there are no API requests and no console errors.
 
 MSW serves the API from a service worker, so in the network tab the request shows up as coming from the service worker.
 
 ## Known issues
 
-In the library:
+- One cache for the whole server. This is the main one. Concurrent requests share it, so one request can wipe another's data while its preload is still waiting on the API. With user-specific data, one user could see another user's data. The fix is a cache per request, passed down through React context, which needs framework changes.
+- Entries never expire. There's no TTL or refetch, and a failed request stays failed until `wipeCache` or a reload.
+- No timeout. If the API hangs, the server response hangs with it.
+- The URL is the whole cache key, so request options aren't supported.
+- The framework trusts the library to escape the inline data. It should do that itself.
+- Mocking is always on, including in production. MSW is about 60% of `client.js`.
+- Every Person and Name re-validates the whole list on each render.
+- Bad data from the API crashes the page, because there's no error boundary.
+- `npm audit` reports advisories in Fastify 4 (which is end of life) and valibot. The affected features aren't used here, but upgrading would be next.
 
-- **One cache for the whole server.** The framework wipes it at the start of each page request, but concurrent requests still share it. One request can wipe another's data while its preload is still waiting on the API, and that page renders "Loading..." instead. With user-specific data, one user could see another user's data. The clean fix is a cache per request, created in `renderApp` and passed down through React context, which needs framework changes. There is a library-only option too: `wipeCache()` runs first in every request, so it could start a fresh cache with Node's `AsyncLocalStorage.enterWith()`, which keeps it to that request. It held up in a quick test with 50 concurrent requests, but `enterWith` is experimental and it relies on the framework always calling `wipeCache()` first, so I'd rather fix it in the framework.
-- **Entries never expire.** There's no TTL or refetch, and a failed request stays failed until `wipeCache`. The fixed API (`useCachingFetch(url)`) doesn't leave room for options.
-- **A failed server fetch is never retried.** If the API fails during the server render, the error goes to the browser with the rest of the cache and stays there, even though the browser could probably fetch the data fine. That keeps hydration matching, but one blip leaves the page broken until it's reloaded. Retrying once after mount would fix it.
-- **No timeout.** If the API hangs, the server response hangs with it. An `AbortSignal.timeout` on the fetch would fix that.
-- **The URL is the whole cache key.** Request options aren't supported, and the same query params in a different order count as a different URL.
-- **Everyone shares the same data object.** If one component mutates it, it changes for everyone.
-- **Error messages include the full URL.** That's fine here, but with a token in the query string it would end up in the page.
-
-In the framework and the app:
-
-- **The framework trusts the library to escape the inline data.** Another implementation that returns plain JSON would be an XSS hole. The framework should handle this itself, for example with `<script type="application/json">` and `<` escaped.
-- **Mocking is always on**, including in production. MSW is about 60% of `client.js`, and the browser waits for the service worker to register before hydrating. It should only run in development and tests.
-- **Validation runs too often.** Every Person and Name re-validates the whole list: 151 validations of 75 records per render. Validating once in App and passing the people down would fix it.
-- **Hard-coded port and paths.** Port 3000 and host `localhost` are fixed, and the server has to be started from the repo root.
-- **Missing production basics**: a health check, graceful shutdown and security headers.
-- **List keys are email addresses**, so two people with the same email would collide.
-- **Bad data crashes the page.** If the API returns the wrong shape, `validateData` throws during render and there's no error boundary. That's a 500 on `/appWithSSRData` and a blank page in the browser.
-- **Old dependencies.** `npm audit --omit=dev` reports 2 high and 1 moderate advisory, in Fastify 4 (and its router, find-my-way) and valibot. Fastify 4 reached end of life in June 2025. The affected features (HTTP/2, schema validation, trusting proxy headers) aren't used here, so the real exposure is low, but upgrading to Fastify 5 and valibot 1 would be next.
+Smaller things: the port and host are hard-coded, list keys are email addresses, and there's no health check or graceful shutdown.
 
 One tooling note: on Windows with Smart App Control turned on, Windows blocks Rollup's native binary, which Vitest uses, so the tests won't start. Running them in WSL works.
+
+## A note on how I worked
+
+This took me longer than the two hours in the brief, and I used an AI coding assistant along the way. I'm happy to walk through any part of it.
