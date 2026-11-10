@@ -226,6 +226,10 @@ describe('preload and transfer to the browser', () => {
     expect(() => initializeCache('%E0%A4%A')).not.toThrow();
     expect(() => initializeCache('null')).not.toThrow();
     expect(consoleError).toHaveBeenCalledTimes(2);
+    // bad entries inside an otherwise fine object get skipped
+    expect(() =>
+      initializeCache(encodeURIComponent('{"a":null,"b":1}')),
+    ).not.toThrow();
 
     render(<Consumer label="app" />);
     expect(await screen.findByText('app: {"name":"Ada"}')).toBeTruthy();

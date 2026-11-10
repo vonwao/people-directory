@@ -198,6 +198,8 @@ export const initializeCache = (serializedCache: string): void => {
   }
 
   Object.entries(parsed).forEach(([url, value]) => {
+    // skip anything that isn't an entry we wrote, instead of crashing on it
+    if (typeof value !== 'object' || value === null) return;
     setEntry(
       url,
       'error' in value
