@@ -150,9 +150,11 @@ describe('useCachingFetch', () => {
     render(<Consumer label="app" />);
     await screen.findByText('app: {"name":"Ada"}');
 
+    fetchMock.mockImplementation(async () => jsonResponse({ name: 'Bea' }));
     wipeCache();
 
-    await screen.findByText('app: {"name":"Ada"}');
+    // new data, so this can't pass on the old text still on screen
+    expect(await screen.findByText('app: {"name":"Bea"}')).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
