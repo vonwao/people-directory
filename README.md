@@ -33,7 +33,7 @@ App, Person and Name all ask for the same URL. The library keeps one cache, keye
 In the browser (`/appWithoutSSRData`):
 
 1. The first render finds nothing cached, so the hook returns `isLoading: true`. That's also what the server rendered, so hydration matches.
-2. After mount, an effect starts the request and puts the promise in the cache right away. The other components find that entry and wait on the same promise instead of starting their own request. So there's one network request, no matter how many components use the URL.
+2. After mount, an effect starts the request and marks the URL as loading in the cache right away. Any other component that mounts before it finishes sees the loading entry and doesn't start its own request. So there's one network request, no matter how many components use the URL. (In this app Person and Name only mount once App has the data, so for them it's a plain cache hit.)
 3. When the request finishes, the entry becomes success or error, and every component using it re-renders. Components subscribe with `useSyncExternalStore`, which is React's built-in way to read from a store that lives outside React.
 
 On the server (`/appWithSSRData`):
@@ -52,9 +52,9 @@ A few decisions worth mentioning:
 
 ## What I set up for Task 1, and why
 
-- **A build that works on Windows.** I'm on Windows, and `npm start` failed there because the scripts used `rm`, `mkdir` and `cp`. They also pointed at `index.js` files that don't exist (esbuild was quietly picking up the `.ts` files instead). [scripts/build.mjs](scripts/build.mjs) does the same job in plain Node. It also builds the browser bundle with `NODE_ENV=production` so React ships its production build, and it adds source maps to the server bundle.
+- **A build that works on Windows.** I'm on Windows, and `npm start` failed there because the scripts used `rm`, `mkdir` and `cp`. They also pointed at `index.js` files that don't exist (esbuild was quietly picking up the `.ts` files instead). [scripts/build.mjs](scripts/build.mjs) does the same job in plain Node. It also builds the server with `NODE_ENV=production`. Before, the server was running React's development build, which is slower. (esbuild already did this for the browser bundle, because it was minified.) The server bundle also gets source maps.
 - **Type-checking.** There was a `tsconfig.json`, but TypeScript wasn't installed and nothing ran it. Now `npm run typecheck` runs `tsc --noEmit`. I updated the config to match how the code is actually built: esbuild and Vitest compile, and TypeScript only checks.
-- **Tests with Vitest.** It handles TypeScript and JSX with no extra setup. [test/cachingFetch.test.tsx](test/cachingFetch.test.tsx) covers the library: one shared request, cache hits, errors, `wipeCache`, preloading, and the round trip through the framework's real inline script with awkward characters. [test/ssr.test.tsx](test/ssr.test.tsx) server-renders the real app against the mock API and checks that all 75 people are in the HTML, with one API request.
+- **Tests with Vitest.** It handles TypeScript and JSX with no extra setup. [test/cachingFetch.test.tsx](test/cachingFetch.test.tsx) covers the library: one shared request, cache hits, errors, `wipeCache`, preloading, and the round trip through the framework's real inline script with awkward characters. [test/ssr.test.tsx](test/ssr.test.tsx) server-renders the real app against the mock API and checks that all 75 people are in the HTML, with one API request. [test/app.test.tsx](test/app.test.tsx) runs the real app in a simulated browser (jsdom) and covers the request counts from the acceptance criteria: one request without server data, and none when hydrating the server HTML, with no console errors.
 - **ESLint and Prettier.** ESLint uses `typescript-eslint` and the React hooks plugin, which catches missing effect dependencies. That's useful in a hooks library. Prettier is set to match the existing code (single quotes), so I didn't have to reformat anyone's files.
 - **CI.** A GitHub Actions workflow runs the type-check, lint, format check, tests and build on Ubuntu and Windows, with Node 22 and 24. Windows is in there because that's where the original build broke.
 - **Repeatable installs.** `package-lock.json` is committed, CI uses `npm ci`, and the Node version is in `.nvmrc` and `engines`. `.gitattributes` and `.editorconfig` keep line endings and indentation the same across operating systems.
@@ -63,7 +63,7 @@ A few decisions worth mentioning:
 
 What I'd add next:
 
-- Browser tests (Playwright) for the two checks that need a real browser: counting API requests and rendering with JavaScript off. I checked those by hand (see below).
+- Browser tests with Playwright against the real built server and service worker. The jsdom tests cover the same criteria, but not a real browser, so I also checked by hand (see below).
 - A dev mode that rebuilds on save.
 - Pre-commit hooks for lint and format, and Dependabot or Renovate for dependency updates.
 - Port, host and mocking set from environment variables, and a Dockerfile.
@@ -86,11 +86,13 @@ MSW serves the API from a service worker, so in the network tab the request show
 
 In the library:
 
-- **One cache for the whole server.** The framework wipes it at the start of each page request, but concurrent requests still share it. One request can wipe another's data between the preload and the render, and that page renders "Loading..." instead. With user-specific data, one user could see another user's data. The fix is a cache per request, created in `renderApp` and passed down through React context. That needs framework changes, which the task ruled out.
+- **One cache for the whole server.** The framework wipes it at the start of each page request, but concurrent requests still share it. One request can wipe another's data while its preload is still waiting on the API, and that page renders "Loading..." instead. With user-specific data, one user could see another user's data. The clean fix is a cache per request, created in `renderApp` and passed down through React context, which needs framework changes. There is a library-only option too: `wipeCache()` runs first in every request, so it could start a fresh cache with Node's `AsyncLocalStorage.enterWith()`, which keeps it to that request. It held up in a quick test with 50 concurrent requests, but `enterWith` is experimental and it relies on the framework always calling `wipeCache()` first, so I'd rather fix it in the framework.
 - **Entries never expire.** There's no TTL or refetch, and a failed request stays failed until `wipeCache`. The fixed API (`useCachingFetch(url)`) doesn't leave room for options.
+- **A failed server fetch is never retried.** If the API fails during the server render, the error goes to the browser with the rest of the cache and stays there, even though the browser could probably fetch the data fine. That keeps hydration matching, but one blip leaves the page broken until it's reloaded. Retrying once after mount would fix it.
 - **No timeout.** If the API hangs, the server response hangs with it. An `AbortSignal.timeout` on the fetch would fix that.
 - **The URL is the whole cache key.** Request options aren't supported, and the same query params in a different order count as a different URL.
 - **Everyone shares the same data object.** If one component mutates it, it changes for everyone.
+- **Error messages include the full URL.** That's fine here, but with a token in the query string it would end up in the page.
 
 In the framework and the app:
 
@@ -100,5 +102,7 @@ In the framework and the app:
 - **Hard-coded port and paths.** Port 3000 and host `localhost` are fixed, and the server has to be started from the repo root.
 - **Missing production basics**: a health check, graceful shutdown and security headers.
 - **List keys are email addresses**, so two people with the same email would collide.
+- **Bad data crashes the page.** If the API returns the wrong shape, `validateData` throws during render and there's no error boundary. That's a 500 on `/appWithSSRData` and a blank page in the browser.
+- **Old dependencies.** `npm audit --omit=dev` reports 2 high and 1 moderate advisory, in Fastify 4 (and its router, find-my-way) and valibot. Fastify 4 reached end of life in June 2025. The affected features (HTTP/2, schema validation, trusting proxy headers) aren't used here, so the real exposure is low, but upgrading to Fastify 5 and valibot 1 would be next.
 
 One tooling note: on Windows with Smart App Control turned on, Windows blocks Rollup's native binary, which Vitest uses, so the tests won't start. Running them in WSL works.
