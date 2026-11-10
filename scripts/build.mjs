@@ -14,7 +14,14 @@ copyFileSync(
   `${outdir}/mockServiceWorker.js`,
 );
 
-const shared = { bundle: true, minify: true, logLevel: 'info' };
+const shared = {
+  bundle: true,
+  minify: true,
+  logLevel: 'info',
+  // react's production build. esbuild already does this for the browser
+  // when minifying, but not for node, so the server was on the dev build
+  define: { 'process.env.NODE_ENV': '"production"' },
+};
 
 await Promise.all([
   build({
@@ -32,7 +39,5 @@ await Promise.all([
     outfile: `${outdir}/client.js`,
     platform: 'browser',
     target: 'es2020',
-    // so the browser gets react's production build
-    define: { 'process.env.NODE_ENV': '"production"' },
   }),
 ]);
